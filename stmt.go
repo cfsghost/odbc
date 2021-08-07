@@ -106,3 +106,16 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	s.os.usedByRows = true // now both Stmt and Rows refer to it
 	return &Rows{os: s.os}, nil
 }
+
+func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) (err error) {
+
+	// Allow value for output
+	switch nv.Value.(type) {
+	case *OutputParam:
+		return nil
+	}
+
+	nv.Value, err = driver.DefaultParameterConverter.ConvertValue(nv.Value)
+
+	return err
+}

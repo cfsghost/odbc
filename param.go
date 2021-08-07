@@ -13,6 +13,11 @@ import (
 	"github.com/alexbrainman/odbc/api"
 )
 
+const (
+	BUFFER_TYPE_OBJECT = iota
+	BUFFER_TYPE_POINTER
+)
+
 type Parameter struct {
 	SQLType     api.SQLSMALLINT
 	Decimal     api.SQLSMALLINT
@@ -33,6 +38,12 @@ func (p *Parameter) StoreStrLen_or_IndPtr(v api.SQLLEN) *api.SQLLEN {
 }
 
 func (p *Parameter) BindValue(h api.SQLHSTMT, idx int, v driver.Value, conn *Conn) error {
+
+	switch v.(type) {
+	case *OutputParam:
+		return p.bindOutputValue(h, idx, v.(*OutputParam), conn)
+	}
+
 	// TODO(brainman): Reuse memory for previously bound values. If memory
 	// is reused, we, probably, do not need to call SQLBindParameter either.
 	var ctype, sqltype, decimal api.SQLSMALLINT
@@ -159,12 +170,71 @@ func (p *Parameter) BindValue(h api.SQLHSTMT, idx int, v driver.Value, conn *Con
 	default:
 		return fmt.Errorf("unsupported type %T", v)
 	}
+
 	ret := api.SQLBindParameter(h, api.SQLUSMALLINT(idx+1),
 		api.SQL_PARAM_INPUT, ctype, sqltype, size, decimal,
 		api.SQLPOINTER(buf), buflen, plen)
 	if IsError(ret) {
 		return NewError("SQLBindParameter", h)
 	}
+	return nil
+}
+
+func (p *Parameter) bindOutputValue(h api.SQLHSTMT, idx int, op *OutputParam, conn *Conn) error {
+
+	var ctype, sqltype, decimal api.SQLSMALLINT
+	var size api.SQLULEN
+	var buflen api.SQLLEN
+	var plen *api.SQLLEN
+	var buf unsafe.Pointer
+	switch buffer := op.buffer.(type) {
+	case *int64:
+		fmt.Println("INT64")
+		d := *buffer
+		if -0x80000000 < d && d < 0x7fffffff {
+			// Some ODBC drivers do not support SQL_BIGINT.
+			// Use SQL_INTEGER if the value fit in int32.
+			// See issue #78 for details.
+			d2 := int32(d)
+			ctype = api.SQL_C_LONG
+			p.Data = &d2
+			buf = unsafe.Pointer(&d2)
+			sqltype = api.SQL_INTEGER
+			size = 4
+		} else {
+			ctype = api.SQL_C_SBIGINT
+			p.Data = &d
+			buf = unsafe.Pointer(&d)
+			sqltype = api.SQL_BIGINT
+			size = 8
+		}
+	case []byte:
+		fmt.Println("Bytes")
+		ctype = api.SQL_C_BINARY
+		p.Data = buffer
+		buf = unsafe.Pointer(&buffer[0])
+		buflen = api.SQLLEN(len(buffer))
+		plen = p.StoreStrLen_or_IndPtr(buflen)
+		size = api.SQLULEN(len(buffer))
+		switch {
+		case p.isDescribed:
+			sqltype = p.SQLType
+		case size <= 0:
+			sqltype = api.SQL_LONGVARBINARY
+		case size >= 8000:
+			sqltype = api.SQL_LONGVARBINARY
+		default:
+			sqltype = api.SQL_BINARY
+		}
+	}
+
+	ret := api.SQLBindParameter(h, api.SQLUSMALLINT(idx+1),
+		api.SQL_PARAM_OUTPUT, ctype, sqltype, size, decimal,
+		api.SQLPOINTER(buf), buflen, plen)
+	if IsError(ret) {
+		return NewError("SQLBindParameter", h)
+	}
+
 	return nil
 }
 
